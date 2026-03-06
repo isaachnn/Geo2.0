@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<title>GEO DASH</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Exo+2:wght@600&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+html,body{
+  width:100%;height:100%;overflow:hidden;
+  background:#0a0612;
+  overscroll-behavior:none;
+  -webkit-overflow-scrolling:none;
+  touch-action:none;
+}
+body{
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+  font-family:'Exo 2',sans-serif;
+  padding-top:env(safe-area-inset-top);
+  padding-bottom:env(safe-area-inset-bottom);
+}
+canvas{
+  display:block;
+  image-rendering:-webkit-optimize-contrast;
+  image-rendering:crisp-edges;
+  box-shadow:0 0 60px rgba(100,200,255,0.2);
+  -webkit-user-select:none;user-select:none;
+  -webkit-touch-callout:none;
+  touch-action:none;
+}
+#hud{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:6px 4px;
+}
+#scoreTxt{
+  font-family:'Orbitron',sans-serif;
+  font-size:clamp(12px,3vw,18px);font-weight:900;
+  color:#fff;text-shadow:0 0 15px #60a5fa;white-space:nowrap;
+}
+#scoreTxt span{color:#60a5fa;}
+#progressWrap{
+  flex:1;margin:0 10px;height:6px;
+  background:rgba(255,255,255,0.08);border-radius:3px;overflow:hidden;
+}
+#progressBar{
+  height:100%;width:0%;
+  background:linear-gradient(90deg,#3b82f6,#a78bfa);
+  border-radius:3px;box-shadow:0 0 8px #60a5fa;
+}
+#pct{
+  font-family:'Orbitron',sans-serif;
+  font-size:clamp(10px,2.5vw,12px);
+  color:rgba(255,255,255,0.5);min-width:34px;text-align:right;
+}
+/* Büyük zıplama butonu — sadece dokunmatik cihazlarda */
+#jumpBtn{
+  display:none;
+  position:fixed;
+  bottom:calc(12px + env(safe-area-inset-bottom));
+  left:50%;transform:translateX(-50%);
+  width:88%;max-width:380px;height:60px;
+  background:rgba(59,130,246,0.12);
+  border:2px solid rgba(96,165,250,0.25);
+  border-radius:18px;
+  color:rgba(255,255,255,0.45);
+  font-family:'Orbitron',sans-serif;font-size:12px;letter-spacing:0.15em;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  cursor:pointer;
+  -webkit-user-select:none;user-select:none;
+  -webkit-touch-callout:none;touch-action:none;
+  z-index:50;
+  align-items:center;justify-content:center;
+}
+#jumpBtn:active{background:rgba(59,130,246,0.3);border-color:rgba(96,165,250,0.6);}
+@media (hover:none) and (pointer:coarse){
+  #jumpBtn{display:flex;}
+}
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="scoreTxt">SKOR: <span id="sv">0</span></div>
+  <div id="progressWrap"><div id="progressBar"></div></div>
+  <div id="pct">0%</div>
+</div>
+<canvas id="c"></canvas>
+<button id="jumpBtn" aria-label="Zıpla">▲ &nbsp;ZIPLA</button>
+
+<script>
+// ── Canvas boyutlandırma ──────────────────────────────────────
+const canvas  = document.getElementById('c');
+const ctx     = canvas.getContext('2d');
+const hud     = document.getElementById('hud');
+const LW=600, LH=340;
+canvas.width=LW; canvas.height=LH;
+
+function resizeCanvas(){
+  const isMobile = window.matchMedia('(hover:none) and (pointer:coarse)').matches;
+  const safeTop  = parseInt(getComputedStyle(document.body).paddingTop)  ||0;
+  const safeBot  = parseInt(getComputedStyle(document.body).paddingBottom)||0;
+  const btnH     = isMobile ? 80 : 0;
+  const hudH     = hud.offsetHeight||34;
+  const availW   = window.innerWidth;
+  const availH   = window.innerHeight - safeTop - safeBot - hudH - btnH - 8;
+  const s        = Math.min(availW/LW, availH/LH);
+  canvas.style.width  = Math.floor(LW*s)+'px';
+  canvas.style.height = Math.floor(LH*s)+'px';
+  hud.style.width     = Math.floor(LW*s)+'px';
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+window.addEventListener('orientationchange',()=>setTimeout(resizeCanvas,250));
+
+// ── Sabitler ─────────────────────────────────────────────────
+const W=LW, H=LH;
+const GRAVITY=0.52, JUMP_FORCE=-14.5;
+const PLAYER_SIZE=28, GROUND_Y=H-60;
+const SCROLL_SPEED_BASE=3.2;
+
+// ── Durum ────────────────────────────────────────────────────
+let state='idle', score=0, cameraX=0, scrollSpeed=SCROLL_SPEED_BASE;
+let deathCount=0, frame=0, scoreTimer=0;
+let particles=[], winParticles=[], deathFlash=0;
+let platforms=[], spikes=[], levelLength=8000;
+let winInterval=null;
+
+const player={x:100,y:GROUND_Y-PLAYER_SIZE,vy:0,onGround:false,rotation:0,dead:false,size:PLAYER_SIZE};
+function resetPlayer(){
+  player.x=100;player.y=GROUND_Y-PLAYER_SIZE;
+  player.vy=0;player.onGround=false;player.rotation=0;player.dead=false;
+}
+
+// ── Level ─────────────────────────────────────────────────────
+function buildLevel(){
+  platforms=[];spikes=[];
+  // Bölüm 1 — düz zemin, tek spike, ısınma
+  addGround(0,1400);
+  addSpike(600,GROUND_Y,1);addSpike(950,GROUND_Y,1);addSpike(1200,GROUND_Y,1);
+
+  // Bölüm 2 — ilk merdiven, spike yok
+  addGround(1400,1900);
+  addStairs(1450,GROUND_Y,3,70,24);
+
+  // Bölüm 3 — geniş düz, tek tük spike
+  addGround(1900,2600);
+  addSpike(2100,GROUND_Y,1);addSpike(2350,GROUND_Y,1);addSpike(2500,GROUND_Y,1);
+
+  // Bölüm 4 — merdiven + tepede tek spike
+  addGround(2600,3100);
+  addStairs(2650,GROUND_Y,4,75,26);
+  addSpike(2800,GROUND_Y-26,1);addSpike(3000,GROUND_Y-52,1);
+
+  // Bölüm 5 — yüksek platform, bol yer
+  addGround(3100,3400);
+  addPlatform(3200,GROUND_Y-80,160,18);
+  addGround(3400,3800);
+  addSpike(3550,GROUND_Y,1);addSpike(3700,GROUND_Y,1);
+
+  // Bölüm 6 — spike gauntlet ama seyrek
+  addGround(3800,4400);
+  addSpike(3900,GROUND_Y,1);addSpike(4050,GROUND_Y,1);
+  addSpike(4200,GROUND_Y,1);addSpike(4350,GROUND_Y,1);
+  addPlatform(4000,GROUND_Y-90,140,18);
+
+  // Bölüm 7 — merdiven + düz alan
+  addGround(4400,5000);
+  addStairs(4450,GROUND_Y,5,70,24);
+  addSpike(4600,GROUND_Y-24,1);addSpike(4800,GROUND_Y-48,1);
+
+  // Bölüm 8 — son koşu
+  addGround(5000,6000);
+  for(let sx=5100;sx<5900;sx+=160)addSpike(sx,GROUND_Y,1);
+  addPlatform(5400,GROUND_Y-80,160,18);
+
+  // Bitiş
+  addGround(6000,levelLength);
+  addSpike(6100,GROUND_Y,1);addSpike(6400,GROUND_Y,1);
+}
+function addGround(x1,x2){platforms.push({x:x1,y:GROUND_Y,w:x2-x1,h:60,isGround:true});}
+function addPlatform(x,y,w,h){platforms.push({x,y,w,h,isGround:false});}
+function addStairs(sx,gy,steps,sw,sh){
+  for(let i=0;i<steps;i++)platforms.push({x:sx+i*sw,y:gy-(i+1)*sh,w:sw+2,h:sh,isGround:false,isStair:true});
+}
+function addSpike(x,gy,count){for(let i=0;i<count;i++)spikes.push({x:x+i*28,y:gy-28,w:28,h:28});}
+
+// ── Partiküller ───────────────────────────────────────────────
+function burst(wx,wy,color,count=16){
+  for(let i=0;i<count;i++){const a=Math.random()*Math.PI*2,s=2+Math.random()*6;
+    particles.push({x:wx,y:wy,vx:Math.cos(a)*s,vy:Math.sin(a)*s-4,life:1,color:color||'#60a5fa',size:2+Math.random()*4});}
+}
+function winBurst(){
+  const cols=['#60a5fa','#a78bfa','#f472b6','#facc15','#4ade80'];
+  for(let i=0;i<60;i++){const a=Math.random()*Math.PI*2,s=2+Math.random()*7;
+    winParticles.push({x:Math.random()*W,y:Math.random()*H*0.6,vx:Math.cos(a)*s,vy:Math.sin(a)*s-4,life:1,color:cols[Math.floor(Math.random()*cols.length)],size:3+Math.random()*5});}
+}
+
+// ── Input ─────────────────────────────────────────────────────
+function tryJump(){
+  if(state==='idle'){startGame();return;}
+  if(state==='dead'||state==='win'){restartGame();return;}
+  if(state==='playing'&&!player.dead&&player.onGround){
+    player.vy=JUMP_FORCE;player.onGround=false;
+    burst(player.x+player.size/2,player.y+player.size,'#60a5fa',8);
+  }
+}
+
+// Klavye
+document.addEventListener('keydown',e=>{if(e.code==='Space'||e.code==='ArrowUp'){e.preventDefault();tryJump();}});
+
+// Canvas touch — iOS için passive:false ŞART
+canvas.addEventListener('touchstart',e=>{e.preventDefault();tryJump();},{passive:false});
+canvas.addEventListener('mousedown',e=>{e.preventDefault();tryJump();});
+
+// Alt buton
+const jumpBtn=document.getElementById('jumpBtn');
+jumpBtn.addEventListener('touchstart',e=>{e.preventDefault();tryJump();},{passive:false});
+jumpBtn.addEventListener('mousedown',e=>{e.preventDefault();tryJump();});
+
+// iOS scroll/zoom engeli
+document.addEventListener('touchmove',e=>e.preventDefault(),{passive:false});
+document.addEventListener('touchstart',e=>{if(e.touches.length>1)e.preventDefault();},{passive:false});
+
+// ── Oyun yönetimi ─────────────────────────────────────────────
+function startGame(){
+  buildLevel();resetPlayer();
+  score=0;cameraX=0;frame=0;scoreTimer=0;
+  particles=[];winParticles=[];deathFlash=0;
+  scrollSpeed=SCROLL_SPEED_BASE;
+  if(winInterval){clearInterval(winInterval);winInterval=null;}
+  updateHUD();state='playing';
+}
+function restartGame(){deathCount++;startGame();}
+function die(){
+  if(player.dead)return;
+  player.dead=true;deathFlash=20;
+  burst(player.x+player.size/2,player.y+player.size/2,'#ef4444',24);
+  burst(player.x+player.size/2,player.y+player.size/2,'#fbbf24',12);
+  setTimeout(()=>{if(state==='playing')state='dead';},600);
+}
+function win(){state='win';winBurst();winInterval=setInterval(winBurst,900);}
+function updateHUD(){
+  document.getElementById('sv').textContent=Math.floor(score);
+  const pct=Math.min(100,Math.floor((cameraX/(levelLength-W))*100));
+  document.getElementById('progressBar').style.width=pct+'%';
+  document.getElementById('pct').textContent=pct+'%';
+}
+
+// ── Güncelle ──────────────────────────────────────────────────
+function update(){
+  if(state!=='playing')return;
+  frame++;
+  scoreTimer++;
+  if(scoreTimer>=60){score++;scoreTimer=0;if(score>=100){win();return;}updateHUD();}
+  scrollSpeed=SCROLL_SPEED_BASE+score*0.012;
+  cameraX+=scrollSpeed;player.x=100;
+  const worldX=cameraX+player.x;
+  player.vy+=GRAVITY;player.y+=player.vy;player.onGround=false;
+  for(let p of platforms){
+    if(p.x+p.w<worldX-50||p.x>worldX+200)continue;
+    const psx=p.x-cameraX;
+    if(!(player.x+player.size>psx&&player.x<psx+p.w))continue;
+    if(player.y-player.vy+player.size<=p.y&&player.y+player.size>=p.y&&player.vy>=0){
+      player.y=p.y-player.size;player.vy=0;player.onGround=true;
+    }
+  }
+  if(player.y>H+50)die();
+  const m=4;
+  for(let s of spikes){
+    const sx=s.x-cameraX;
+    if(player.x+m<sx+s.w-m&&player.x+player.size-m>sx+m&&player.y+m<s.y+s.h-m&&player.y+player.size-m>s.y+m){die();break;}
+  }
+  player.rotation=player.onGround?Math.round(player.rotation/90)*90:player.rotation+5;
+  for(let p of particles){p.x+=p.vx;p.y+=p.vy;p.vy+=0.25;p.life-=0.04;}
+  particles=particles.filter(p=>p.life>0);
+  for(let p of winParticles){p.x+=p.vx;p.y+=p.vy;p.vy+=0.2;p.life-=0.015;}
+  winParticles=winParticles.filter(p=>p.life>0);
+  if(deathFlash>0)deathFlash--;
+  updateHUD();
+}
+
+// ── Çiz ───────────────────────────────────────────────────────
+function draw(){
+  const bg=ctx.createLinearGradient(0,0,0,H);
+  bg.addColorStop(0,'#050310');bg.addColorStop(1,'#0d0a2a');
+  ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
+  const lo=(frame*scrollSpeed*0.15)%80;
+  ctx.strokeStyle='rgba(96,165,250,0.04)';ctx.lineWidth=1;
+  for(let x=-80;x<W+80;x+=80){ctx.beginPath();ctx.moveTo(x-lo,0);ctx.lineTo(x-lo,H);ctx.stroke();}
+  ctx.strokeStyle='rgba(167,139,250,0.04)';
+  for(let y=0;y<H;y+=60){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+  for(let p of platforms){const sx=p.x-cameraX;if(sx+p.w<-10||sx>W+10)continue;drawPlatform(sx,p.y,p.w,p.h,p.isGround,p.isStair);}
+  for(let s of spikes){const sx=s.x-cameraX;if(sx+s.w<0||sx>W)continue;drawSpike(sx,s.y,s.w,s.h);}
+  for(let p of particles){ctx.save();ctx.globalAlpha=p.life*0.9;ctx.fillStyle=p.color;ctx.shadowColor=p.color;ctx.shadowBlur=8;ctx.beginPath();ctx.arc(p.x,p.y,p.size,0,Math.PI*2);ctx.fill();ctx.restore();}
+  if(state!=='idle')drawPlayer();
+  for(let p of winParticles){ctx.save();ctx.globalAlpha=p.life;ctx.fillStyle=p.color;ctx.shadowColor=p.color;ctx.shadowBlur=10;ctx.beginPath();ctx.arc(p.x,p.y,p.size,0,Math.PI*2);ctx.fill();ctx.restore();}
+  if(deathFlash>0){ctx.fillStyle=`rgba(239,68,68,${deathFlash/20*0.4})`;ctx.fillRect(0,0,W,H);}
+  if(state==='idle')drawIdle();
+  if(state==='dead')drawDead();
+  if(state==='win')drawWin();
+}
+function drawPlatform(sx,sy,pw,ph,isGround,isStair){
+  const g=ctx.createLinearGradient(sx,sy,sx,sy+ph);
+  if(isGround){g.addColorStop(0,'#1e1b4b');g.addColorStop(1,'#0f0c2e');}
+  else if(isStair){g.addColorStop(0,'#1e3a5f');g.addColorStop(1,'#0d2040');}
+  else{g.addColorStop(0,'#1f2937');g.addColorStop(1,'#111827');}
+  ctx.fillStyle=g;ctx.fillRect(sx,sy,pw,ph);
+  const lc=isGround?'#3b82f6':isStair?'#06b6d4':'#818cf8';
+  ctx.fillStyle=lc;ctx.fillRect(sx,sy,pw,3);
+  ctx.fillStyle=`rgba(${isGround?'59,130,246':isStair?'6,182,212':'129,140,248'},0.15)`;
+  ctx.fillRect(sx,sy+3,pw,12);
+  if(isGround){ctx.strokeStyle='rgba(59,130,246,0.08)';ctx.lineWidth=1;
+    for(let gx=sx;gx<sx+pw;gx+=30){ctx.beginPath();ctx.moveTo(gx,sy);ctx.lineTo(gx,sy+ph);ctx.stroke();}}
+}
+function drawSpike(sx,sy,sw,sh){
+  const cx=sx+sw/2;ctx.save();ctx.shadowColor='#f87171';ctx.shadowBlur=12;
+  ctx.beginPath();ctx.moveTo(sx,sy+sh);ctx.lineTo(cx,sy);ctx.lineTo(sx+sw,sy+sh);ctx.closePath();
+  const g=ctx.createLinearGradient(cx,sy,cx,sy+sh);
+  g.addColorStop(0,'#fca5a5');g.addColorStop(0.5,'#ef4444');g.addColorStop(1,'#7f1d1d');
+  ctx.fillStyle=g;ctx.fill();ctx.strokeStyle='rgba(252,165,165,0.6)';ctx.lineWidth=1.5;ctx.stroke();ctx.restore();
+}
+function drawPlayer(){
+  if(player.dead&&deathFlash<=0)return;
+  const cx=player.x+player.size/2,cy=player.y+player.size/2,s=player.size;
+  ctx.save();ctx.translate(cx,cy);ctx.rotate(player.rotation*Math.PI/180);
+  ctx.shadowColor='#60a5fa';ctx.shadowBlur=18;
+  const bg=ctx.createLinearGradient(-s/2,-s/2,s/2,s/2);
+  bg.addColorStop(0,'#93c5fd');bg.addColorStop(0.5,'#3b82f6');bg.addColorStop(1,'#1d4ed8');
+  ctx.fillStyle=bg;rr(ctx,-s/2,-s/2,s,s,5);ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,0.15)';rr(ctx,-s/4,-s/4,s/2,s/2,3);ctx.fill();
+  ctx.strokeStyle='rgba(147,197,253,0.8)';ctx.lineWidth=2;rr(ctx,-s/2,-s/2,s,s,5);ctx.stroke();
+  ctx.fillStyle='white';ctx.fillRect(2,-4,7,7);ctx.fillStyle='#1e3a8a';ctx.fillRect(4,-2,4,4);ctx.restore();
+}
+function rr(ctx,x,y,w,h,r){
+  ctx.beginPath();ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.arcTo(x+w,y,x+w,y+r,r);
+  ctx.lineTo(x+w,y+h-r);ctx.arcTo(x+w,y+h,x+w-r,y+h,r);
+  ctx.lineTo(x+r,y+h);ctx.arcTo(x,y+h,x,y+h-r,r);
+  ctx.lineTo(x,y+r);ctx.arcTo(x,y,x+r,y,r);ctx.closePath();
+}
+function overlayBg(){ctx.fillStyle='rgba(5,3,16,0.88)';ctx.fillRect(0,0,W,H);}
+function drawIdle(){
+  overlayBg();ctx.save();
+  ctx.font='bold 48px Orbitron,sans-serif';ctx.textAlign='center';
+  const tg=ctx.createLinearGradient(W/2-140,0,W/2+140,0);
+  tg.addColorStop(0,'#60a5fa');tg.addColorStop(0.5,'#a78bfa');tg.addColorStop(1,'#f472b6');
+  ctx.fillStyle=tg;ctx.shadowColor='#60a5fa';ctx.shadowBlur=30;ctx.fillText('GEO DASH',W/2,H/2-38);
+  ctx.font='13px sans-serif';ctx.fillStyle='rgba(255,255,255,0.45)';ctx.shadowBlur=0;
+  ctx.fillText('Ekrana dokun → Zıpla  |  100 skora ulaş!',W/2,H/2+12);
+  const p=0.5+0.5*Math.sin(frame*0.08);
+  ctx.globalAlpha=p;ctx.fillStyle='#60a5fa';ctx.shadowColor='#60a5fa';ctx.shadowBlur=15;
+  ctx.fillText('▶  BAŞLAMAK İÇİN DOKUN',W/2,H/2+58);ctx.restore();
+}
+function drawDead(){
+  overlayBg();ctx.save();
+  ctx.font='bold 42px Orbitron,sans-serif';ctx.textAlign='center';
+  ctx.fillStyle='#ef4444';ctx.shadowColor='#ef4444';ctx.shadowBlur=25;ctx.fillText('ÖLDÜN!',W/2,H/2-38);
+  ctx.font='13px sans-serif';ctx.fillStyle='rgba(255,255,255,0.4)';ctx.shadowBlur=0;
+  ctx.fillText(`Skor: ${Math.floor(score)}   Deneme: ${deathCount}`,W/2,H/2+5);
+  const p=0.5+0.5*Math.sin(frame*0.1);
+  ctx.globalAlpha=p;ctx.fillStyle='#60a5fa';ctx.shadowColor='#60a5fa';ctx.shadowBlur=15;
+  ctx.fillText('▶  TEKRAR DENEMEK İÇİN DOKUN',W/2,H/2+45);ctx.restore();
+}
+function drawWin(){
+  ctx.save();ctx.fillStyle='rgba(5,3,16,0.78)';ctx.fillRect(0,0,W,H);
+  ctx.font='bold 42px Orbitron,sans-serif';ctx.textAlign='center';
+  const wg=ctx.createLinearGradient(W/2-140,0,W/2+140,0);
+  wg.addColorStop(0,'#4ade80');wg.addColorStop(0.5,'#facc15');wg.addColorStop(1,'#a78bfa');
+  ctx.fillStyle=wg;ctx.shadowColor='#4ade80';ctx.shadowBlur=30;ctx.fillText('TEBRİKLER! 🏆',W/2,H/2-38);
+  ctx.font='14px sans-serif';ctx.fillStyle='rgba(255,255,255,0.65)';ctx.shadowBlur=0;
+  ctx.fillText('100 skora ulaştın! Harika koşu! 🎉',W/2,H/2+5);
+  const p=0.5+0.5*Math.sin(frame*0.1);
+  ctx.globalAlpha=p;ctx.fillStyle='#60a5fa';ctx.shadowColor='#60a5fa';ctx.shadowBlur=15;
+  ctx.fillText('▶  TEKRAR OYNAMAK İÇİN DOKUN',W/2,H/2+48);ctx.restore();
+}
+
+function loop(){update();draw();requestAnimationFrame(loop);}
+loop();
+</script>
+</body>
+</html>
